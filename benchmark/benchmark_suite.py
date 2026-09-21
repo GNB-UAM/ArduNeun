@@ -23,6 +23,7 @@ import sys
 import os
 import csv
 import gc
+import psutil
 from datetime import datetime as dt
 from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple, Callable, Optional, Any
@@ -160,123 +161,417 @@ class SimulatorBenchmark(ABC):
 # ============================================================================
 # Concrete Simulator Implementations
 # ============================================================================
-
 class NeunBenchmark(SimulatorBenchmark):
     """Neun framework benchmarks"""
-    
+
     def __init__(self):
         super().__init__("Neun", "#2E86AB")
-    
-    def benchmark_single_neuron(self, duration_ms: float = 1000, 
-                                dt_ms: float = 0.025, n_runs: int = 5) -> BenchmarkResult:
-        """Benchmark Neun with single Hodgkin-Huxley neuron"""
+
+    # ------------------------------------------------------------------------
+    # Common helpers
+    # ------------------------------------------------------------------------
+
+    @staticmethod
+    def _create_hh_neuron(gna: float = 120.0):
+        """Create and configure one Neun Hodgkin-Huxley neuron."""
+        args = neun_py.HHDoubleConstructorArgs()
+        neuron = neun_py.HHDoubleRK4(args)
+
+        neuron.set_param(
+            neun_py.HHDoubleParameter.cm,
+            1.0 * 7.854e-3
+        )
+        neuron.set_param(
+            neun_py.HHDoubleParameter.vna,
+            50
+        )
+        neuron.set_param(
+            neun_py.HHDoubleParameter.vk,
+            -77
+        )
+        neuron.set_param(
+            neun_py.HHDoubleParameter.vl,
+            -54.387
+        )
+        neuron.set_param(
+            neun_py.HHDoubleParameter.gna,
+            gna * 7.854e-3
+        )
+        neuron.set_param(
+            neun_py.HHDoubleParameter.gk,
+            36 * 7.854e-3
+        )
+        neuron.set_param(
+            neun_py.HHDoubleParameter.gl,
+            0.3 * 7.854e-3
+        )
+
+        neuron.set(
+            neun_py.HHDoubleVariable.v,
+            -65
+        )
+
+        return neuron
+
+    @staticmethod
+    def _pin_to_core(core: int = 0):
+        """
+        Temporarily pin the current process to one CPU core.
+
+        Returns:
+            Previous CPU affinity, so it can be restored afterwards.
+        """
+        process = psutil.Process(os.getpid())
+
+        previous_affinity = process.cpu_affinity()
+        available_cores = previous_affinity
+
+        if core not in available_cores:
+            raise ValueError(
+                f"Requested CPU core {core} is not available. "
+                f"Available cores: {available_cores}"
+            )
+
+        process.cpu_affinity([core])
+
+        return previous_affinity
+
+    @staticmethod
+    def _restore_affinity(previous_affinity):
+        """Restore the CPU affinity of the current process."""
+        process = psutil.Process(os.getpid())
+        process.cpu_affinity(previous_affinity)
+
+    # ------------------------------------------------------------------------
+    # Existing benchmarks
+    # ------------------------------------------------------------------------
+
+    def benchmark_single_neuron(
+        self,
+        duration_ms: float = 1000,
+        dt_ms: float = 0.025,
+        n_runs: int = 5
+    ) -> BenchmarkResult:
+        """Benchmark Neun with single Hodgkin-Huxley neuron."""
+
         times = []
-        
+
+        n_steps = int(duration_ms / dt_ms)
+
         for run in range(n_runs):
-            # Setup
-            args = neun_py.HHDoubleConstructorArgs()
-            neuron = neun_py.HHDoubleRK4(args)
-            
-            # Set parameters
-            neuron.set_param(neun_py.HHDoubleParameter.cm, 1.0 * 7.854e-3)
-            neuron.set_param(neun_py.HHDoubleParameter.vna, 50)
-            neuron.set_param(neun_py.HHDoubleParameter.vk, -77)
-            neuron.set_param(neun_py.HHDoubleParameter.vl, -54.387)
-            neuron.set_param(neun_py.HHDoubleParameter.gna, 120 * 7.854e-3)
-            neuron.set_param(neun_py.HHDoubleParameter.gk, 36 * 7.854e-3)
-            neuron.set_param(neun_py.HHDoubleParameter.gl, 0.3 * 7.854e-3)
-            neuron.set(neun_py.HHDoubleVariable.v, -65)
-            
-            # Benchmark
-            n_steps = int(duration_ms / dt_ms)
+            neuron = self._create_hh_neuron()
+
             start = time.perf_counter()
-            
+
             for _ in range(n_steps):
                 neuron.add_synaptic_input(10.0)
                 neuron.step(dt_ms)
-            
+
             elapsed = time.perf_counter() - start
             times.append(elapsed)
-        
-        return BenchmarkResult(np.mean(times), np.std(times), self.name, 'single')
-    
-    def benchmark_network(self, n_neurons: int = 100, duration_ms: float = 1000,
-                         dt_ms: float = 0.025, n_runs: int = 3) -> BenchmarkResult:
-        """Benchmark Neun with small network of coupled neurons"""
+
+            del neuron
+
+        return BenchmarkResult(
+            np.mean(times),
+            np.std(times),
+            self.name,
+            'single',
+            metadata={
+                'n_steps': n_steps,
+                'neuron_steps': n_steps,
+                'steps_per_second': n_steps / np.mean(times),
+                'microseconds_per_step': (
+                    np.mean(times) * 1e6 / n_steps
+                )
+            }
+        )
+
+    def benchmark_network(
+        self,
+        n_neurons: int = 100,
+        duration_ms: float = 1000,
+        dt_ms: float = 0.025,
+        n_runs: int = 3
+    ) -> BenchmarkResult:
+        """Benchmark Neun with small network of coupled neurons."""
+
         times = []
-        
+
+        n_steps = int(duration_ms / dt_ms)
+
         for run in range(n_runs):
-            # Create neurons
             neurons = []
+
             for i in range(n_neurons):
-                args = neun_py.HHDoubleConstructorArgs()
-                neuron = neun_py.HHDoubleRK4(args)
-                
-                # Set parameters
-                neuron.set_param(neun_py.HHDoubleParameter.cm, 1.0 * 7.854e-3)
-                neuron.set_param(neun_py.HHDoubleParameter.gna, 120 * 7.854e-3)
-                neuron.set_param(neun_py.HHDoubleParameter.gk, 36 * 7.854e-3)
-                neuron.set_param(neun_py.HHDoubleParameter.gl, 0.3 * 7.854e-3)
-                neuron.set(neun_py.HHDoubleVariable.v, -65 + np.random.randn() * 5)
-                
+                neuron = self._create_hh_neuron()
+
+                neuron.set(
+                    neun_py.HHDoubleVariable.v,
+                    -65 + np.random.randn() * 5
+                )
+
                 neurons.append(neuron)
-            
-            # Benchmark
-            n_steps = int(duration_ms / dt_ms)
+
             start = time.perf_counter()
-            
+
             for _ in range(n_steps):
-                # Add coupling (simple gap junction-like)
                 for i in range(n_neurons):
                     current = 10.0 + np.random.randn() * 2.0
+
                     if i > 0:
-                        v_i = neurons[i].get(neun_py.HHDoubleVariable.v)
-                        v_prev = neurons[i-1].get(neun_py.HHDoubleVariable.v)
+                        v_i = neurons[i].get(
+                            neun_py.HHDoubleVariable.v
+                        )
+                        v_prev = neurons[i - 1].get(
+                            neun_py.HHDoubleVariable.v
+                        )
+
                         current += 0.1 * (v_prev - v_i)
+
                     neurons[i].add_synaptic_input(current)
                     neurons[i].step(dt_ms)
-            
+
             elapsed = time.perf_counter() - start
             times.append(elapsed)
-        
-        return BenchmarkResult(np.mean(times), np.std(times), self.name, 'network')
-    
-    def benchmark_parameter_sweep(self, n_sweeps: int = 100, duration_ms: float = 100,
-                                  dt_ms: float = 0.025, n_runs: int = 3) -> BenchmarkResult:
-        """Benchmark parameter sweep: many short simulations with different parameters"""
+
+            del neurons
+            gc.collect()
+
+        total_neuron_steps = n_steps * n_neurons
+
+        return BenchmarkResult(
+            np.mean(times),
+            np.std(times),
+            self.name,
+            'network',
+            metadata={
+                'n_neurons': n_neurons,
+                'n_steps': n_steps,
+                'neuron_steps': total_neuron_steps,
+                'neuron_steps_per_second': (
+                    total_neuron_steps / np.mean(times)
+                ),
+                'microseconds_per_neuron_step': (
+                    np.mean(times) * 1e6 / total_neuron_steps
+                )
+            }
+        )
+
+    def benchmark_parameter_sweep(
+        self,
+        n_sweeps: int = 100,
+        duration_ms: float = 100,
+        dt_ms: float = 0.025,
+        n_runs: int = 3
+    ) -> BenchmarkResult:
+        """Benchmark parameter sweep."""
+
         times = []
-        
+
+        n_steps = int(duration_ms / dt_ms)
+        total_steps = n_sweeps * n_steps
+
         for run in range(n_runs):
-            # Parameter ranges for sweep
-            gna_values = np.linspace(100, 140, n_sweeps)  # Sodium conductance sweep
-            
+            gna_values = np.linspace(100, 140, n_sweeps)
+
             start = time.perf_counter()
-            
+
             for gna in gna_values:
-                # Create new neuron for each parameter set
-                args = neun_py.HHDoubleConstructorArgs()
-                neuron = neun_py.HHDoubleRK4(args)
-                
-                # Set parameters (varying gna)
-                neuron.set_param(neun_py.HHDoubleParameter.cm, 1.0 * 7.854e-3)
-                neuron.set_param(neun_py.HHDoubleParameter.vna, 50)
-                neuron.set_param(neun_py.HHDoubleParameter.vk, -77)
-                neuron.set_param(neun_py.HHDoubleParameter.vl, -54.387)
-                neuron.set_param(neun_py.HHDoubleParameter.gna, gna * 7.854e-3)
-                neuron.set_param(neun_py.HHDoubleParameter.gk, 36 * 7.854e-3)
-                neuron.set_param(neun_py.HHDoubleParameter.gl, 0.3 * 7.854e-3)
-                neuron.set(neun_py.HHDoubleVariable.v, -65)
-                
-                # Run short simulation
-                n_steps = int(duration_ms / dt_ms)
+                neuron = self._create_hh_neuron(gna)
+
                 for _ in range(n_steps):
                     neuron.add_synaptic_input(10.0)
                     neuron.step(dt_ms)
-            
+
+                del neuron
+
             elapsed = time.perf_counter() - start
             times.append(elapsed)
-        
-        return BenchmarkResult(np.mean(times), np.std(times), self.name, 'parameter_sweep')
+
+        return BenchmarkResult(
+            np.mean(times),
+            np.std(times),
+            self.name,
+            'parameter_sweep',
+            metadata={
+                'n_sweeps': n_sweeps,
+                'steps_per_sweep': n_steps,
+                'total_steps': total_steps,
+                'steps_per_second': (
+                    total_steps / np.mean(times)
+                ),
+                'microseconds_per_step': (
+                    np.mean(times) * 1e6 / total_steps
+                )
+            }
+        )
+
+    # ------------------------------------------------------------------------
+    # Memory benchmark
+    # ------------------------------------------------------------------------
+
+    def benchmark_memory(
+        self,
+        n_neurons: int = 1000,
+        n_runs: int = 5
+    ) -> BenchmarkResult:
+        """
+        Measure resident memory increase when creating N Neun neurons.
+
+        RSS is used because Neun objects contain native C++ state that
+        Python tracemalloc does not necessarily account for.
+        """
+
+        process = psutil.Process(os.getpid())
+        measurements = []
+
+        for run in range(n_runs):
+            # Try to start from a clean Python/native allocation state.
+            gc.collect()
+
+            rss_before = process.memory_info().rss
+
+            neurons = []
+
+            for _ in range(n_neurons):
+                neurons.append(self._create_hh_neuron())
+
+            # Make sure objects are actually alive before measuring.
+            gc.collect()
+
+            rss_after = process.memory_info().rss
+
+            memory_used = rss_after - rss_before
+            measurements.append(memory_used)
+
+            # Explicitly release the neurons.
+            del neurons
+            gc.collect()
+
+        mean_memory = float(np.mean(measurements))
+        std_memory = float(np.std(measurements))
+
+        bytes_per_neuron = mean_memory / n_neurons
+
+        print(
+            f"[Neun Memory] "
+            f"{n_neurons} neurons: "
+            f"{mean_memory / 1024:.2f} KiB ± "
+            f"{std_memory / 1024:.2f} KiB "
+            f"({bytes_per_neuron:.2f} bytes/neuron)"
+        )
+
+        return BenchmarkResult(
+            mean_memory,
+            std_memory,
+            self.name,
+            'memory',
+            metadata={
+                'n_neurons': n_neurons,
+                'bytes_per_neuron': bytes_per_neuron,
+                'kib_per_neuron': bytes_per_neuron / 1024.0
+            }
+        )
+
+    # ------------------------------------------------------------------------
+    # CPU benchmark
+    # ------------------------------------------------------------------------
+
+    def benchmark_cpu(
+        self,
+        duration_ms: float = 1000,
+        dt_ms: float = 0.025,
+        n_runs: int = 5,
+        core: int = 0
+    ) -> BenchmarkResult:
+        """
+        Benchmark pure Neun computation pinned to a single CPU core.
+
+        The affinity is restored after the benchmark.
+        """
+
+        previous_affinity = self._pin_to_core(core)
+
+        try:
+            n_steps = int(duration_ms / dt_ms)
+            times = []
+            cpu_times = []
+
+            process = psutil.Process(os.getpid())
+
+            for run in range(n_runs):
+                neuron = self._create_hh_neuron()
+
+                gc.collect()
+
+                cpu_before = process.cpu_times()
+                start = time.perf_counter()
+
+                for _ in range(n_steps):
+                    neuron.add_synaptic_input(10.0)
+                    neuron.step(dt_ms)
+
+                elapsed = time.perf_counter() - start
+
+                cpu_after = process.cpu_times()
+
+                cpu_time = (
+                    (cpu_after.user - cpu_before.user)
+                    +
+                    (cpu_after.system - cpu_before.system)
+                )
+
+                times.append(elapsed)
+                cpu_times.append(cpu_time)
+
+                del neuron
+
+            mean_time = float(np.mean(times))
+            std_time = float(np.std(times))
+
+            steps_per_second = n_steps / mean_time
+            microseconds_per_step = (
+                mean_time * 1e6 / n_steps
+            )
+
+            mean_cpu_time = float(np.mean(cpu_times))
+
+            # This is only a secondary diagnostic.
+            # Because the process is pinned to one core, values close to
+            # 100% indicate that the process kept that core busy.
+            cpu_utilization = (
+                mean_cpu_time / mean_time * 100.0
+                if mean_time > 0
+                else 0.0
+            )
+
+            print(
+                f"[Neun CPU] "
+                f"core={core}, "
+                f"time={mean_time:.6f}s ± {std_time:.6f}s, "
+                f"{steps_per_second:,.0f} steps/s, "
+                f"{microseconds_per_step:.3f} µs/step, "
+                f"CPU={cpu_utilization:.1f}%"
+            )
+
+            return BenchmarkResult(
+                mean_time,
+                std_time,
+                self.name,
+                'cpu',
+                metadata={
+                    'core': core,
+                    'n_steps': n_steps,
+                    'steps_per_second': steps_per_second,
+                    'microseconds_per_step': microseconds_per_step,
+                    'cpu_time_seconds': mean_cpu_time,
+                    'cpu_utilization_percent': cpu_utilization
+                }
+            )
+
+        finally:
+            self._restore_affinity(previous_affinity)
 
 
 class NeuronBenchmark(SimulatorBenchmark):
@@ -1100,7 +1395,7 @@ class BenchmarkSuite:
         print(f"Benchmarks: {', '.join([s.name for s in self.benchmark_specs])}")
         print(f"Reproducibility controls:")
         print(f"  - Warmup runs: {self.warmup_runs}")
-        print(f"  - Statistics: {'Median ± IQR' if self.use_median else 'Mean ± Std'}")
+        print("  - Statistics: Mean ± Std")
         print(f"  - Thermal delay: {self.delay}s")
         print(f"  - Randomize order: {randomize_order}")
         print(f"  - Garbage collection: enabled")
@@ -1139,10 +1434,16 @@ class BenchmarkSuite:
                 # Convert to median/IQR if requested
                 # Note: Individual benchmark methods still compute mean/std,
                 # but we could enhance them to return raw times for better control
-                if self.use_median:
-                    print(f"{result.mean_time:.4f}s (IQR reported as ±{result.std_time:.4f}s)")
+                if spec.name == 'memory':
+                    print(
+                        f"{result.mean_time / 1024:.2f} KiB "
+                        f"(±{result.std_time / 1024:.2f} KiB)"
+                    )
                 else:
-                    print(f"{result.mean_time:.4f}s (±{result.std_time:.4f}s)")
+                    print(
+                        f"{result.mean_time:.4f}s "
+                        f"(±{result.std_time:.4f}s)"
+    )
                 
                 sim.results[spec.name] = result
                 
@@ -1315,6 +1616,30 @@ if __name__ == '__main__':
             display_name='Parameter Sweep',
             description='100 sweeps × 100ms, dt=0.025ms',
             default_params={'n_sweeps': 100, 'duration_ms': 100, 'dt_ms': 0.025, 'n_runs': 10}  # Increased from 3
+        ))
+
+        suite.register_benchmark(BenchmarkSpec(
+            name='memory',
+            method_name='benchmark_memory',
+            display_name='Memory Usage',
+            description='1000 HH neurons, RSS increase',
+            default_params={
+                'n_neurons': 1000,
+                'n_runs': 5
+            }
+        ))
+
+        suite.register_benchmark(BenchmarkSpec(
+            name='cpu',
+            method_name='benchmark_cpu',
+            display_name='Single-Core CPU',
+            description='1000ms, dt=0.025ms, pinned to CPU core 0',
+            default_params={
+                'duration_ms': 1000,
+                'dt_ms': 0.025,
+                'n_runs': 10,
+                'core': 0
+            }
         ))
         
         # Register output handlers
