@@ -77,7 +77,7 @@ def parse_file(filepath: str):
 
 
 if __name__ == '__main__':
-    infile = sys.argv[1] if len(sys.argv) > 1 else 'sizes.txt'
+    infile = sys.argv[1] if len(sys.argv) > 1 else 'sizes.csv'
     entries = parse_file(infile)
 
     if not entries:
@@ -95,36 +95,70 @@ if __name__ == '__main__':
 
     print(f'\nParsed {len(entries)} block(s) -> {out_csv}')
 
-    import csv
+    import re
+    import numpy as np
     import matplotlib.pyplot as plt
 
     with open('sizes.csv') as f:
         rows = list(csv.DictReader(f))
 
-    labels = [r['label'] for r in rows]
-    flash = [int(r['text']) + int(r['data']) for r in rows]  # bytes written to flash
+    # "C1: ESP32-s3_Basic w/o Neun" -> caso "C1: Basic w/o Neun", placa "ESP32-S3"
+    LABEL_RE = re.compile(r'^(?P<case>C\d+):\s*(?P<board>[^_]+)_(?P<name>.*)$')
 
-    # Common board flash sizes, in bytes (adjust to match your actual hardware/partition table)
-    board_capacities = {
-        'ESP32-S3 (8MB flash)':  8 * 1024 * 1024,
-        'ESP32-S3 (4MB flash)':  4 * 1024 * 1024,
-        'ESP8266 (4MB flash)':   4 * 1024 * 1024,
-        'ESP8266 (1MB flash)':   1 * 1024 * 1024,
+    cases = {}  # etiqueta del caso -> {placa: flash usada en bytes}
+    for r in rows:
+        m = LABEL_RE.match(r['label'])
+        if not m:
+            print(f"Etiqueta no reconocida: {r['label']!r}")
+            continue
+        case_label = f"{m['case']}: {m['name']}"
+        board = m['board'].upper()                      # ESP32-S3 / ESP8266
+        cases.setdefault(case_label, {})[board] = int(r['text']) + int(r['data'])
+
+    board_colors = {
+        'ESP32-S3': 'steelblue',
+        'ESP8266':  'darkorange',
     }
 
-    plt.figure(figsize=(9, 5.5))
-    bars = plt.bar(labels, flash, color='steelblue', zorder=3)
+    # Líneas de capacidad: (texto leyenda, bytes, placa/color)
+    capacities = [
+        ('ESP32-S3 flash (4 MB)', 4 * 1024 * 1024, 'ESP32-S3'),
+        ('ESP8266 flash (4 MB)',  4 * 1024 * 1024, 'ESP8266'),
+        ('ESP8266 flash (1 MB)',  1 * 1024 * 1024, 'ESP8266'),
+    ]
 
-    # Draw a horizontal reference line for each board capacity
-    colors = ['crimson', 'darkorange', 'seagreen', 'purple']
-    for (board, capacity), color in zip(board_capacities.items(), colors):
-        plt.axhline(y=capacity, color=color, linestyle='--', linewidth=1.5,
-                    label=f'{board} max ({capacity / 1024 / 1024:.0f} MB)', zorder=2)
+    plt.figure(figsize=(10, 5.5))
 
-    plt.ylabel('Flash used (bytes)')
+    # Barras agrupadas: una por placa dentro de cada caso
+    x = np.arange(len(cases))
+    width = 0.38
+    for i, (board, color) in enumerate(board_colors.items()):
+        values = [cases[c].get(board, 0) for c in cases]
+        plt.bar(x + (i - 0.5) * width, values, width,
+                color=color, label=board, zorder=3)
+
+    # Líneas de referencia (mismo color que la placa). Si comparten
+    # capacidad, se desplaza el patrón de guiones para que se vean ambas.
+    dash = 6
+    seen = {}
+    for name, capacity, board in capacities:
+        n = seen.get(capacity, 0)
+        seen[capacity] = n + 1
+        plt.axhline(y=capacity, color=board_colors[board],
+                    linestyle=(n * dash, (dash, dash)),
+                    linewidth=1.5, label=name, zorder=2)
+
+    kb_ticks = [0, 256 * 1024, 512 * 1024, 768 * 1024]
+    mb_ticks = [i * 1024 * 1024 for i in range(1, 5)]
+    tick_labels = ['0 KB', '256 KB', '512 KB', '768 KB'] + [f'{i} MB' for i in range(1, 5)]
+
+    plt.yticks(kb_ticks + mb_ticks, tick_labels)
+    plt.xticks(x, list(cases.keys()), rotation=20, ha='right')
+    plt.ylabel('Flash used')
     plt.title('Flash memory usage per case')
-    plt.xticks(rotation=20, ha='right')
+    plt.grid(axis='y', linestyle=':', linewidth=0.8, alpha=0.5, zorder=0)
     plt.legend(loc='upper left', fontsize=8)
+
     plt.tight_layout()
     plt.savefig('flash_usage.png', dpi=150)
     plt.show()
