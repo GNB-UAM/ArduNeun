@@ -19,7 +19,7 @@
 typedef RungeKutta6 Integrator;
 
 typedef DifferentialNeuronWrapper<
-    SystemWrapper<HodgkinHuxleyModel<double>>,
+    SystemWrapper<HodgkinHuxleyModel<float>>,
     Integrator>
     Neuron;
 
@@ -29,10 +29,10 @@ typedef DifferentialNeuronWrapper<
 // -----------------------------------------------------------------------------
 
 // Number of integration steps for each benchmark.
-constexpr std::size_t NUM_STEPS = 40000;
+constexpr std::size_t NUM_STEPS = 1000;
 
 // Integration step, identical to the original example.
-constexpr double STEP = 0.025;
+float STEP = 0.1;
 
 // Population sizes to benchmark.
 constexpr std::size_t NETWORK_SIZES[] = {
@@ -267,7 +267,64 @@ void setup() {
     // Run all benchmark sizes
     // -------------------------------------------------------------------------
 
-    constexpr std::size_t NUM_NETWORK_SIZES =
+    std::size_t NUM_NETWORK_SIZES =
+        sizeof(NETWORK_SIZES) / sizeof(NETWORK_SIZES[0]);
+
+    for (std::size_t i = 0; i < NUM_NETWORK_SIZES; ++i) {
+        benchmark(NETWORK_SIZES[i]);
+
+        // Small pause between tests.
+        delay(500);
+    }
+
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("          BENCHMARK COMPLETE");
+    Serial.println("========================================");
+    
+    
+    // Give USB serial time to clean
+    delay(10000);
+
+    STEP = 0.01;
+
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("        NEUN ESP32-S3 BENCHMARK");
+    Serial.println("========================================");
+
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(500);
+
+    digitalWrite(LED_BUILTIN, LOW);
+    delay(500);
+    Serial.print("CPU frequency: ");
+    Serial.print(getCpuFrequencyMhz());
+    Serial.println(" MHz");
+
+    Serial.print("Free heap: ");
+    Serial.print(ESP.getFreeHeap());
+    Serial.println(" bytes");
+
+    Serial.print("Free PSRAM: ");
+    Serial.print(ESP.getFreePsram());
+    Serial.println(" bytes");
+
+    Serial.print("sizeof(Neuron): ");
+    Serial.print(sizeof(Neuron));
+    Serial.println(" bytes");
+
+    Serial.print("Integration step: ");
+    Serial.println(STEP, 6);
+
+    Serial.print("Steps per benchmark: ");
+    Serial.println(NUM_STEPS);
+
+    // -------------------------------------------------------------------------
+    // Run all benchmark sizes
+    // -------------------------------------------------------------------------
+
+    NUM_NETWORK_SIZES =
         sizeof(NETWORK_SIZES) / sizeof(NETWORK_SIZES[0]);
 
     for (std::size_t i = 0; i < NUM_NETWORK_SIZES; ++i) {

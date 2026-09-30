@@ -26,30 +26,47 @@ Neuron::ConstructorArgs makeNeuronArgs() {
     return args;
 }
 
+Neuron::ConstructorArgs args = makeNeuronArgs();
+
+Neuron neuron(args);
 void setup() {
     Serial.begin(115200);
 
     delay(1000);
 
-    Neuron::ConstructorArgs args = makeNeuronArgs();
-
-    Neuron neuron(args);
 
     neuron.set(Neuron::v, -80);
     neuron.set(Neuron::m, 0.1);
     neuron.set(Neuron::n, 0.7);
     neuron.set(Neuron::h, 0.01);
 
-    // Force the compiler to instantiate and retain the actual
-    // neuron/integrator code.
-    neuron.add_synaptic_input(10.0);
-    neuron.step(0.001);
+}
+// Set the integration step
+static int plot_counter = 0;
+
+double t = 0;
+double step = 0.1;
+void loop() {
+
+    neuron.add_synaptic_input(0.1);
+    neuron.step(step);
 
     double v = neuron.get(Neuron::v);
 
-    Serial.print("Neun HH voltage: ");
-    Serial.println(v, 10);
-}
+    // if (++plot_counter >= 3) {
+    //     plot_counter = 0;
+        // Serial.print("Neun HH voltage: ");
+        Serial.print(t, 4);
+        Serial.print(" ");
+        Serial.println(v, 4);
+    // }
+    t+=step;
 
-void loop() {
+    // digitalWrite(LED_BUILTIN, HIGH);
+    // delay(50);
+
+    // digitalWrite(LED_BUILTIN, LOW);
+    // delay(50);
+
+
 }
