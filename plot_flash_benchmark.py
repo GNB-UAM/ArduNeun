@@ -160,5 +160,5 @@ if __name__ == '__main__':
     plt.legend(loc='upper left', fontsize=8)
 
     plt.tight_layout()
-    plt.savefig('flash_usage.png', dpi=150)
+    plt.savefig('flash_usage.pdf', format='pdf')
     plt.show()
